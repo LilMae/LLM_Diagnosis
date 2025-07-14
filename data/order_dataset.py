@@ -7,6 +7,8 @@ import lightning as L
 
 import torch
 
+import dataset_util
+
 from utils.util import count_classes
 from torch.utils.data import random_split, Dataset, DataLoader
 from scipy.interpolate import interp1d
@@ -178,7 +180,11 @@ class OrderFreqDataset(Dataset):
         return normalized_mag, normalized_normal_mag, class_name
     
     def open_file(self, file_path):
-    
+        
+        # dataset name parsing
+        dataset_name = dataset_util.get_dataset_name(file_path)
+        fs = dataset_util.get_sampling_rate(dataset_name)
+
         # 0. File Open & Parsing
         class_name, sampling_rate, rpm, _, load_condition, _ = os.path.split(file_path)[-1].split('_')
         
@@ -214,7 +220,7 @@ class OrderFreqDataset(Dataset):
             interpolated_mag.append(interpolated_ch)
         interpolated_mag = np.array(interpolated_mag)
         
-        severity = self.calculate_severity(data_np)
+        severity = self.calculate_severity(data_np, fs)
         
         data_info = {
             'class_name' : class_name,
@@ -226,8 +232,20 @@ class OrderFreqDataset(Dataset):
 
         return interpolated_mag, interpolated_freq, data_info
     
-    def calculate_severity(self, data_np):
-        severity = '여기에서 연산'
+    def calculate_severity(self, data_np, fs):
+        """
+        data_np: shape (C, T) raw accel[g] for each axis
+        fs      : sampling rate [Hz]
+        return  : ISO10816-1 Class I severity (A|B|C|D)
+        """
+        # each Channel's RMS
+        rms_vals = [
+            dataset_util.rms_velocity_mm(data_np[ch], fs) for ch in range(data_np.shape[0])
+        ]
+        max_rms = max(rms_vals)
+
+        severity = dataset_util.classify_severity(max_rms)
+        print(f"severity: {severity}")
         return severity
     
     
@@ -320,7 +338,7 @@ class ExtendedOrderFreqDataset(OrderFreqDataset):
 if __name__ == '__main__':
     
     dataset = OrderFreqDataset(
-        data_root= '/home/data'
+        data_root= '/home/dataset'
     )
 
     sample_tensor, normal_tensor, class_tensor = dataset[0]
