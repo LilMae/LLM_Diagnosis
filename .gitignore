@@ -8,3 +8,6 @@ cached_dataset.pt
 results/
 *.ipynb
 wandb/
+data/plot/
+data/plot2
+plot/

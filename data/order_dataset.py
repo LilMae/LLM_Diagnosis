@@ -9,7 +9,11 @@ import torch
 
 import dataset_util
 
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from utils.util import count_classes
+
 from torch.utils.data import random_split, Dataset, DataLoader
 from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
@@ -107,9 +111,9 @@ class OrderFreqDataset(Dataset):
     def __init__(self, data_root, 
                 classes = ['normal', 'looseness', 'misalignment', 'unbalance', 'bearing'], 
                 dataset_list = ['dxai', 'mfd', 'vat', 'vbl'],
-                averaging_size = 100, 
-                target_len=260, 
-                sensor_list=['motor_x', 'motor_y'], 
+                averaging_size = 100,
+                target_len=260,
+                sensor_list=['motor_x', 'motor_y'],
                 max_order = 10,
                 cache_dir = './cache'):
         
@@ -194,6 +198,7 @@ class OrderFreqDataset(Dataset):
         class_name = class_name.split('-')[0]
         
         file_pd = pd.read_csv(file_path)
+
         data = []
         for sensor_name in self.sensor_list:
             data.append(file_pd[sensor_name])
@@ -220,7 +225,7 @@ class OrderFreqDataset(Dataset):
             interpolated_mag.append(interpolated_ch)
         interpolated_mag = np.array(interpolated_mag)
         
-        severity = self.calculate_severity(data_np, fs)
+        severity = self.calculate_severity(data_np, sampling_rate, dataset_name)
         
         data_info = {
             'class_name' : class_name,
@@ -232,19 +237,22 @@ class OrderFreqDataset(Dataset):
 
         return interpolated_mag, interpolated_freq, data_info
     
-    def calculate_severity(self, data_np, fs):
+    def calculate_severity(self, data_np, fs, dataset_name):
         """
         data_np: shape (C, T) raw accel[g] for each axis
         fs      : sampling rate [Hz]
         return  : ISO10816-1 Class I severity (A|B|C|D)
         """
+        
         # each Channel's RMS
         rms_vals = [
-            dataset_util.rms_velocity_mm(data_np[ch], fs) for ch in range(data_np.shape[0])
+            dataset_util.rms_velocity_mm(data_np[ch], fs, dataset_name) for ch in range(data_np.shape[0])
         ]
         max_rms = max(rms_vals)
 
         severity = dataset_util.classify_severity(max_rms)
+        print(data_np.shape)
+        print(f"sampling rate: {fs}")
         print(f"severity: {severity}")
         return severity
     
@@ -255,6 +263,8 @@ class OrderFreqDataset(Dataset):
         dataset_col = []
         
         data_list = []
+
+        severity_counts = {cls: {'A': 0, 'B': 0, 'C': 0, 'D': 0} for cls in self.classes}
 
         for dataset_name in os.listdir(data_root):
             dataset_dir = os.path.join(data_root, dataset_name)
@@ -271,6 +281,10 @@ class OrderFreqDataset(Dataset):
                     dataset_col.append(dataset_name)
                     data_list.append(interpolated_mag)
 
+                    cls = data_info['class_name']
+                    sev = data_info['severity']
+                    severity_counts[cls][sev] += 1
+
         dataset_df = pd.DataFrame(data_info_list)
         dataset_df['dataset'] = dataset_col
         data_np = np.array(data_list)
@@ -284,6 +298,10 @@ class OrderFreqDataset(Dataset):
         
         self.dataset_df = dataset_df
         self.data_np = data_np
+
+        print("Class-Severity counts:")
+        for cls, counts in severity_counts.items():
+            print(f"{cls}: {counts}")
     
 # ExtendedOrderFreqDataset subclass
 class ExtendedOrderFreqDataset(OrderFreqDataset):
@@ -336,10 +354,13 @@ class ExtendedOrderFreqDataset(OrderFreqDataset):
 
 
 if __name__ == '__main__':
-    
+    data_root = '/home/dataset/vbl_2'
+
     dataset = OrderFreqDataset(
-        data_root= '/home/dataset'
+        data_root= data_root
     )
+
+    dataset_util.vis_distribution(data_root)
 
     sample_tensor, normal_tensor, class_tensor = dataset[0]
     print(f'sample_tensor : {sample_tensor.shape}')
