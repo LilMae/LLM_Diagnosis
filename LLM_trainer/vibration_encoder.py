@@ -155,8 +155,11 @@ def build_stft_module(modality_key: str, llm_hidden_size: int, vib_enc_pth:str) 
     ae = VisionTransformerAE(num_classes=5)
     """
     여기에 승하가 pretrain_ae로 가중치를 로드하는 내용을 넣어주어야 함
+    load code 수정은 완료, pretrained_model_path => /checkpoints/best_model.pth
     """
-    pretrained_ae = ae.load_state_dict(vib_enc_pth)
+    ckpt = torch.load(vib_enc_pth)
+    state = ckpt.get("model_state_dict", ckpt)
+    pretrained_ae = ae.load_state_dict(state, strict=True)
     vib_cfg = VibrationEncoderConfig(
         input_channels=2,
         input_length=224,

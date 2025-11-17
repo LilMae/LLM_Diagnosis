@@ -26,7 +26,7 @@ if __name__ == '__main__':
     parser.add_argument("--apply_lora", type=bool, default=True, help="lora finetuning 적용 여부")
     parser.add_argument("--cache_dir", type=str, default='./llm_cache', help="llm_model 캐싱할 폴더")
     parser.add_argument("--llm_name", type=str, default='Qwen/Qwen3-4B-Instruct-2507', help="LLM 모델 이름")
-    parser.add_argument("--vib_enc_pth", type=str, default='', help="학습된 vib_encoder 가중치 경로")
+    parser.add_argument("--vib_enc_pth", type=str, default='LLM_Diagnosis/checkpoints/best_model_0.pth', help="학습된 vib_encoder 가중치 경로")
     
     # 학습 옵션
     parser.add_argument("--total_steps",    type=int,   default=10,     help="학습 step 횟수")

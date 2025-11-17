@@ -350,7 +350,7 @@ def mfd_parsing(mfd_root, dist_root):
     return meta_pd
 
 if __name__=='__main__':
-    original_root = os.path.join("/home", "data", 'original')
+    original_root = os.path.join("/home", "data")
     output_root = os.path.join(os.getcwd(), 'unzipped')
     if os.path.exists(output_root):
         shutil.rmtree(output_root)

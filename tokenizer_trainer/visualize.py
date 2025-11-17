@@ -1,19 +1,15 @@
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from data.dataset import _channel_labels_for_mode
-import umap
 
 
 # 1) 임베딩/라벨/예측/데이터셋 수집 (배치 돌며 쌓아서 concat)
 # embeds: (N, D), y_true: (N,), y_pred: (N,), ds_name: (N,)  ex) ["A","B","C","D","Val"]
 # 예: y_pred = logits.argmax(1).cpu().numpy()
 
-def umap_2d(embeds, n_neighbors=15, min_dist=0.1, metric="cosine", seed=0):
-    reducer = umap.UMAP(n_components=2, n_neighbors=n_neighbors,
-                        min_dist=min_dist, metric=metric, random_state=seed)
-    return reducer.fit_transform(embeds)
 
 def pca_2d(embeds):
     return PCA(n_components=2).fit_transform(embeds)
@@ -91,8 +87,8 @@ def create_reconstruction_figure(
     원본과 재구성 이미지를 채널별로 나란히 비교하는 matplotlib Figure를 생성합니다.
     이 Figure 객체는 wandb.Image()로 변환되어 로깅될 수 있습니다.
     """
-    orig_arr = orig_tensor.detach().cpu().numpy()
-    rec_arr = rec_tensor.detach().cpu().numpy()
+    orig_arr = orig_tensor.detach().to(dtype=torch.float32).cpu().numpy()
+    rec_arr  = rec_tensor.detach().to(dtype=torch.float32).cpu().numpy()
     
     assert orig_arr.ndim == 3, "Input must be (C,H,W)"
     C, H, W = orig_arr.shape

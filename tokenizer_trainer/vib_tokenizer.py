@@ -110,8 +110,8 @@ class VibTokeizerTrainer(L.LightningModule):
         self.register_buffer("logit_scale", torch.tensor(float(logit_scale_val)), persistent=False)
 
     def training_step(self, batch, batch_idx):
-        x = batch['current_x']
-        y = batch['current_y'].long()
+        x = batch['x_stft']
+        y = batch['x_cls']
 
         z = self.vib_tokenizer(x)        # (B, d)  
         t = self.emb_matrix[y]           # (B, d)  타깃 = LLM 원본 임베딩
@@ -143,7 +143,8 @@ class VibTokeizerTrainer(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x = batch['current_x']; y = batch['current_y'].long()
+        x = batch['x_stft']
+        y = batch['x_cls']
         z = self.vib_tokenizer(x)
         t = self.emb_matrix[y]
 

@@ -31,7 +31,7 @@ from cornstarch.models.multimodal_language_model.processing_multimodal_language_
     MultimodalProcessor,
 )
 
-from LLM_Diagnosis.LLM_trainer.vibration_encoder import build_stft_module, STFTProcessor, stft_num_features
+from LLM_trainer.vibration_encoder import build_stft_module, STFTProcessor, stft_num_features
 
 
 MODALITY_KEYS: tuple[str, str] = ("x_stft", "ref_stft")
@@ -103,7 +103,12 @@ def build_multimodal_system(
             lora_alpha=16,
             lora_dropout=0.05,
             bias="none",
-        )
+            target_modules=[
+                    "q_proj", "k_proj", "v_proj",   # attention 쿼리/키/값 투영
+                    "o_proj",                       # attention 출력 투영
+                    "down_proj", "up_proj"          # feed-forward 내부 투영 (if present)
+            ]
+    )
         llm = get_peft_model(llm, peft_config)
         if hasattr(llm, "enable_input_require_grads"):
             llm.enable_input_require_grads()

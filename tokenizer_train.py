@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tokenizer_trainer.models.ViT_pytorch import VisionTransformerAE
 
-from data.dataset import OrderInvariantSignalImager, WindowedVibrationDataset
+from data.dataset import OrderInvariantSignalImager, VibrationDataset
 
 from tokenizer_trainer.vib_tokenizer import VibrationTokenizer, VibTokeizerTrainer
 
@@ -18,7 +18,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if __name__ =='__main__':
     parser = argparse.ArgumentParser(description='Vibration LLM training/evaluation script')
     # 데이터셋 관련 옵션들
-    parser.add_argument('--data_root',   type=str, default='/Volumes/dataset_onlyMac/processed', help='llm_dataset_caching.py를 통해 만들어진 데이터 pt파일경로')
+    parser.add_argument('--data_root',   type=str, default='./data/processed', help='llm_dataset_caching.py를 통해 만들어진 데이터 pt파일경로')
     
     # 캐싱 경로 옵션들
     parser.add_argument('--model_cache',    type=str, default='./llm_cache', help='LLM 모델들을 caching해둘 경로 (TRANSFORMERS_CACHE)')
@@ -28,7 +28,7 @@ if __name__ =='__main__':
     parser.add_argument('--log_dir',    type=str, default='./log_output', help='학습 결과가 저장될 디렉토리')
     
     # LLM 모델 관련 옵션들
-    parser.add_argument('--run_name',    type=str, default='0904', help='wandb에 저장될 run 이름')
+    parser.add_argument('--run_name',    type=str, default='1104', help='wandb에 저장될 run 이름')
     parser.add_argument('--llm_model',      type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='LLM Model name')
     
     
@@ -67,10 +67,10 @@ if __name__ =='__main__':
     llm.resize_token_embeddings(len(tokenizer))
 
     # 2. Vibration Tokenizer 세팅
-    vib_ae = VisionTransformerAE(
-                                    num_classes=5,
-                                    )
-    # vib_ae.load_state_dict(torch.load(args.pretrained_path))
+    vib_ae = VisionTransformerAE(num_classes=5,)
+    payload = torch.load(args.pretrained_path)
+    state_dict = payload.get('model_state_dict', payload)
+    vib_ae.load_state_dict(state_dict)
     
     vib_tokenizer = VibrationTokenizer(
                                         vib_ae=vib_ae,
@@ -94,25 +94,21 @@ if __name__ =='__main__':
                                 stft_center=True,
                                 stft_power=1.0,           
                             )
-    vib_trainset = WindowedVibrationDataset(
+    vib_trainset = VibrationDataset(
                                 data_root=args.data_root,
                                 using_dataset = ['vat', 'vbl', 'mfd'],
                                 window_sec=5,
                                 stride_sec=3,
-                                cache_mode='none',                      
                                 transform=signal_imger,
-                                dict_style=True,
-                                test_mode=True
+                                test_mode=False
                             )
-    vib_valset = WindowedVibrationDataset(
+    vib_valset = VibrationDataset(
                                 data_root=args.data_root,
                                 using_dataset = ['dxai'],
                                 window_sec=5,
                                 stride_sec=3,
-                                cache_mode='none',                      
                                 transform=signal_imger,
-                                dict_style=True,
-                                test_mode=True
+                                test_mode=False
                             )
     
     train_loader = DataLoader(vib_trainset, batch_size=args.batch_size, shuffle=True,

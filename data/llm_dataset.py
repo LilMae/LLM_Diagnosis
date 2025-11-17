@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 import numpy as np
 
-from dataset import VibrationDataset
+from .dataset import VibrationDataset
 
 class LLM_Dataset(Dataset):
     def __init__(self, vibration_dataset:VibrationDataset,
