@@ -285,16 +285,23 @@ class LLM_Dataset(Dataset):
                 ref_bpfo_hz = None
                 ref_bpfi_hz = None
 
-        ref_feat = self.feature_extract(data_dict['ref_vib'], sr=ref_sr, rpm=ref_rpm, bpfo_hz=ref_bpfo_hz, bpfi_hz=ref_bpfi_hz)
+            ref_feat = self.feature_extract(data_dict['ref_vib'], 
+                                            sr=ref_sr, 
+                                            rpm=ref_rpm, 
+                                            bpfo_hz=ref_bpfo_hz, 
+                                            bpfi_hz=ref_bpfi_hz)
 
         cur_status = {}
-        if ref_feat and x_feat is not None:
+        if ref_feat is not None and x_feat is not None:
             common_keys = set(x_feat.keys()) & set(ref_feat.keys())
+            eps = 1e-6
             for k in common_keys:
                 x_value = x_feat[k]
                 ref_value = ref_feat[k]
                 if isinstance(x_value, (int, float, np.floating)) and isinstance(ref_value, (int, float, np.floating)):
-                    cur_status[k] = round(float((x_value - ref_value) / (ref_value)) * 100)
+                    denom = ref_value if abs(ref_value) > eps else eps
+                    ratio = (x_value - ref_value) / denom * 100.0
+                    cur_status[k] = round(float(ratio), 1)  # 소수 1자리 정도만
         
         # cur_status를 딕셔너리 형식으로 반환 (0이 아닌 값만 필터링)
         cur_status_filtered = {k: v for k, v in cur_status.items() if abs(v) > 1e-6}

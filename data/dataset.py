@@ -229,7 +229,7 @@ class VibrationDataset(Dataset):
         }
         
         data_dict = {
-                # 'x_vib' : x_vib, 
+                'x_vib' : x_vib, 
                 'x_stft' : x_stft,
                 'x_cls' : x_cls,
                 'x_info' : x_info
@@ -259,7 +259,7 @@ class VibrationDataset(Dataset):
                     "file_name": str(ref_row["file_name"]),
                 }
                 ref_dict = {
-                            # 'ref_vib' : ref_vib,
+                            'ref_vib' : ref_vib,
                             'ref_stft' : ref_stft, 
                             'ref_cls' : tensor_cls_norm, 
                             'ref_info' : ref_info

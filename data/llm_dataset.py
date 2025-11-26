@@ -335,49 +335,35 @@ def retrieve_documents(
         "bearing fault": ["bearing", "BPFO", "BPFI", "ball pass", "inner race", "outer race"],
     }
     
-    # 검색 쿼리 생성 (비정상 특징 강조)
-    query_parts = [
-        "vibration diagnosis rotating machinery",
-        f"diagnostic methods classify {target_labels}",
-    ]
-    
-    # 극단적 변화 특징 강조
-    if extreme_features:
-        extreme_feat_names = [f[0] for f in extreme_features[:5]]  # 상위 5개
-        query_parts.append("CRITICAL abnormal features")
-        query_parts.extend(extreme_feat_names)
-        query_parts.append("extreme deviation from normal")
-    
-    # 큰 변화 특징 포함
-    if large_features:
-        large_feat_names = [f[0] for f in large_features[:5]]
-        query_parts.append("significant changes")
-        query_parts.extend(large_feat_names)
-    
-    # 추론된 고장 유형 키워드 추가
+    query_parts = []
+
+    # 1) 어떤 task인지 한 줄로
+    query_parts.append(
+        f"vibration-based fault diagnosis for rotating machinery "
+        f"among {target_labels}"
+    )
+
+    # 2) 가장 큰 변화가 있는 feature들
+    if extreme_features or large_features:
+        top_feats = (extreme_features + large_features)[:8]
+        feat_names = [f[0] for f in top_feats]
+        query_parts.append(
+            "abnormal vibration features: " + ", ".join(feat_names)
+        )
+
+    # 3) 의심되는 고장 유형
     if suspected_faults:
-        for fault in suspected_faults:
-            query_parts.extend(fault_keywords.get(fault, []))
-    else:
-        # 모든 고장 유형 키워드 포함 (다양성 확보)
-        for keywords in fault_keywords.values():
-            query_parts.extend(keywords[:2])
-    
-    # 특징 기반 키워드 추가
-    query_parts.extend([
-        "order spectrum analysis",
-        "RMS vibration",
-        "kurtosis",
-        "crest factor",
-        "frequency domain",
-        "harmonic components",
-        "ISO 7919",
-        "ISO 10816",
-        "diagnostic thresholds"
-    ])
-    
-    # 최종 쿼리 구성
-    base_query = " ".join(query_parts)
+        query_parts.append(
+            "suspected fault types: " + ", ".join(suspected_faults)
+        )
+
+    # 4) 우리가 원하는 것
+    query_parts.append(
+        "provide diagnostic criteria, thresholds, and rules "
+        "to distinguish these fault types based on these features"
+    )
+
+    base_query = " | ".join(query_parts)
     
     # 비정상 특징 요약 생성
     abnormal_summary = []
@@ -395,14 +381,10 @@ def retrieve_documents(
         knowledge_str = str(current_knowledge)[:400]
     
     query = (
-        f"{base_query}. "
-        f"Focus on abnormal indicators with significant deviation from normal baseline. "
-        f"{' '.join(abnormal_summary)}. "
-        f"Current vibration state (change rates % from normal baseline): {knowledge_str}. "
-        "Note: Change rates show percentage deviation from normal state. "
-        "Positive values indicate increase from normal, negative values indicate decrease. "
-        "For example, order_x_2x: 316% means the 2nd harmonic component is 316% higher than normal. "
-        "Provide diagnostic criteria, thresholds, and classification methods specifically for these abnormal features."
+        base_query + ". "
+        f"Current feature change ratios (vs normal): {knowledge_str}. "
+        "Focus on rules and thresholds for interpreting skewness, kurtosis, orders, RMS, crest factor, "
+        "and bearing characteristic frequencies (BPFO/BPFI)."
     )
     
     # retriever의 k 값을 가져오기
@@ -566,6 +548,7 @@ class Planner:
         self.target_labels = "normal(healthy), misalignment, looseness, unbalance, bearing fault"
     
     def plan(self, current_knowledge, retrive_docs):
+        docs_text = format_docs(retrive_docs)  # 아래에서 설명할 format_docs 활용
         prompt = (
             "System: You are a senior vibration analyst. Be precise and cite sources.\n"
             f"User: We will diagnose rotating machinery among: {self.target_labels}.\n"
@@ -573,18 +556,32 @@ class Planner:
             "Evidence snippets from manuals/papers are given below, each prefixed with [DOC#]. \n"
             "Extract concrete, actionable rules (thresholds, patterns, symptom descriptions) with citations like [DOC3].\n"
             "Return STRICT JSON with keys: plan_steps, diagnosis_plan.\n"
-            "- plan_steps: 5-8 short imperative steps (strings).\n"
-            f"- diagnosis_plan: object with keys {self.target_labels}, each a list of diagnosis idea;\n"
-            "  every rule item must be a JSON object: {\"diagnosis idea\": <one line>, \"why\": <short reason>, \"source\": \"DOC#\"}.\n"
+            f"- plan_steps: 3–5 very short imperative steps (one line each).\n"
+            "- diagnosis_plan: object with keys {self.target_labels}.\n"
+            "For each key, include at most 2 items.\n"
+            'Each item must be: {"diagnosis idea": "<one line>", "why": "<short reason (<=30 tokens)>", "source": "DOC#"}.'
             "Constraints: Use only information supported by the snippets.\n"
-            f"Evidence: {retrive_docs} \n"
+            f"Evidence:\n{docs_text}\n"
+            "Do NOT invent any new numeric thresholds or specific example values that are not explicitly present in the evidence.\n"
+            'If a threshold value is not given, keep it qualitative (e.g., "high", "very high").\n'
             "Assistant: Output JSON only, no extra text. Do not hallucinate."
         )
         with torch.no_grad():
-            input_ids = self.tokenizer(prompt, return_tensors='pt').to(self.device)
-            out_ids = self.llm.generate(**input_ids, max_new_tokens=self.max_tokens, do_sample=False)
-            out_text = self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
-        return out_text.strip()
+            inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
+            input_len = inputs["input_ids"].shape[1]
+
+            out_ids = self.llm.generate(
+                **inputs,
+                max_new_tokens=self.max_tokens,
+                do_sample=False
+            )
+
+            # 모델이 새로 생성한 토큰만 디코딩
+            gen_ids = out_ids[0, input_len:]
+            gen_text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+        # 여기서는 JSON만 나오도록 프롬프트를 짰으니 그대로 반환
+        return gen_text.strip()
     
     def summerize(self, plan):
         prompt = (
@@ -600,26 +597,21 @@ class Planner:
         return out_text.strip()
     
     def __call__(self, current_knowledge):
-        
         retrive_docs = retrieve_documents(
-                                        retriever=self.retreiver, 
-                                        current_knowledge=current_knowledge
-                                        )
-        
-        plan = self.plan(current_knowledge, retrive_docs)
-        
-        evidence = retrive_docs
-        json_part = plan.split('Assistant: Output JSON only, no extra text. Do not hallucinate.')[1]
-        
-        return json_part
+            retriever=self.retreiver, 
+            current_knowledge=current_knowledge
+        )
+        plan_json = self.plan(current_knowledge, retrive_docs)
+        return plan_json  # 그대로 JSON string
     
-    def test_prompt(self, prompt):
+    def test_prompt(self, prompt: str) -> str:
         with torch.no_grad():
-            input_ids = self.tokenizer(prompt, return_tensors='pt').to(self.device)
-            out_ids = self.llm.generate(**input_ids, max_new_tokens=self.max_tokens, do_sample=False)
-            out_text = self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
-        response = out_text.strip().split('Assistant')[1]
-        return response
+            inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
+            input_len = inputs["input_ids"].shape[1]
+            out_ids = self.llm.generate(**inputs, max_new_tokens=self.max_tokens, do_sample=False)
+            gen_ids = out_ids[0, input_len:]
+            gen_text = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        return gen_text.strip()
         
 
 
@@ -656,13 +648,21 @@ class LLM_Dataset(Dataset):
         
     def __len__(self):
         return len(self.vibration_dataset)
+    
+    def _format_change_ratios(self, current_knowledge: Dict[str, float], top_k: int = 20) -> str:
+        if not isinstance(current_knowledge, dict):
+            return str(current_knowledge)
 
+        # 변화율 절댓값 기준 상위 k개만 출력
+        items = sorted(current_knowledge.items(), key=lambda x: abs(x[1]), reverse=True)[:top_k]
+        return ", ".join([f"{k}: {v:.1f}%" for k, v in items])
+    
     def _create_prompt(self, current_knowledge: Dict[str, float], plan: str) -> str:
         """GRPO 학습에 맞게 압축된 프롬프트 생성"""
 
         # 변화율 딕셔너리를 문자열로 변환
         # (나중에 JSON 포맷으로 바꾸고 싶다면: knowledge_str = json.dumps(current_knowledge, ensure_ascii=False))
-        knowledge_str = str(current_knowledge)
+        knowledge_str = self._format_change_ratios(current_knowledge, top_k=20)
 
         # 1) System 프롬프트: 짧고 역할만 명확하게
         system_prompt = (
@@ -694,20 +694,21 @@ class LLM_Dataset(Dataset):
         ### RULES
 
         A. Token-based rules (Step 1)
-        - If <x_stft> and <ref_stft> are very similar → prefer normal(healthy).
-        - If they differ clearly → choose one of: misalignment, looseness, unbalance, bearing fault.
-        - Step 1 must output exactly one label from:
+        - You CANNOT see the numeric or spectral content of normal and current state tokens. They are abstract tokens.
+        - You MUST NOT claim that the tokens are "similar", "different", or "show deviation", because you cannot observe their values.
+        - In this setup, treat the token-based analysis as a weak prior:
+        - If the plan or features strongly support a specific fault, you MAY set vib_only_label to the SAME fault
+            (so that tokens are consistent with the feature-based conclusion).
+        - Otherwise, you MAY set vib_only_label = "normal(healthy)" as a neutral prior.
+        - You must still pick exactly one label from:
         normal(healthy), misalignment, looseness, unbalance, bearing fault.
 
         B. Feature-based rules (Step 2)
         Use the feature change ratios above plus the reference plan to choose ONE label.
-        Quantitative hints:
-        - High kurtosis (kurtosis_x > 1000 or kurtosis_y > 2000) → favor bearing fault.
-        - Large crest factor (crest_factor_x > 500 or crest_factor_y > 500) → looseness or bearing fault.
-        - |order_x_1x| or |order_y_1x| change > 30 → unbalance or misalignment.
-        - Strong negative BPFO/BPFI peaks with high kurtosis → bearing fault.
-        - RMS and peak-to-peak much larger than 0 (strong positive change) → abnormal (not normal(healthy)).
-
+        - Large positive increases in kurtosis or crest factor (e.g., strong positive change %) → evidence for impulsive events (looseness or bearing fault).
+        - Large negative changes in kurtosis, skewness, or crest factor mean "less impulsive" and should NOT be used as evidence for bearing fault.
+        - You may ignore features that are not mentioned in the plan unless they are clearly critical.
+        
         Step 2 must also output exactly one label from:
         normal(healthy), misalignment, looseness, unbalance, bearing fault.
 
@@ -723,8 +724,9 @@ class LLM_Dataset(Dataset):
 
         <reasoning>
         Step 1 (tokens):
-        - Briefly compare <x_stft> vs <ref_stft>.
-        - Choose vib_only_label (one of: normal(healthy), misalignment, looseness, unbalance, bearing fault).
+        - Explicitly state that you CANNOT observe the numeric content of normal and current state tokens.
+        - Then choose vib_only_label according to the weak-prior rule above
+        (either copy the feature-based fault when evidence is strong, or use normal(healthy) as a neutral prior).
 
         Step 2 (features):
         - Use the feature change ratios and the reference plan.
@@ -741,118 +743,20 @@ class LLM_Dataset(Dataset):
 
         <answer>{{
         "vib_only_label": "<one of: normal(healthy), misalignment, looseness, unbalance, bearing fault>",
-        "vib_reason": "<1–2 sentences explaining the token-based conclusion>",
+        "vib_reason": "<1–2 sentences explaining the token-based conclusion WITHOUT claiming to see numeric differences or similarity between tokens",
         "knowledge_only_label": "<one of: normal(healthy), misalignment, looseness, unbalance, bearing fault>",
         "knowledge_reason": "<1–2 sentences explaining the feature-based conclusion>",
-        "criteria": "<2–3 main feature indicators that led to the final decision>",
+        "criteria": [
+        "<first key feature indicator>",
+        "<second key feature indicator>",
+        "<optional third key feature indicator>"
+        ],
         "final_label": "<one of: normal(healthy), misalignment, looseness, unbalance, bearing fault>",
         "fusion_reason": "<1–2 sentences explaining how you fused Step 1 and Step 2>"
         }}</answer>
         """
 
         return f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
-
-    # def _create_prompt(self, current_knowledge: Dict[str, float], plan: str) -> str:
-    #     """프롬프트 생성"""
-    #     # 변화율 딕셔너리를 문자열로 변환
-    #     knowledge_str = str(current_knowledge)
-        
-    #     # 프롬프트 템플릿 구성
-    #     system_prompt = (
-    #         "You are an AI diagnostic engine specialized in vibration-based fault detection for rotating machinery. "
-    #         "You must follow a strict rule-based diagnostic framework and a three-step reasoning process. "
-    #         "You must rely ONLY on the provided vibration tokens, physical features, and diagnostic criteria. "
-    #         "Do NOT invent extra sensor data, frequency components, or physical conditions that are not given. "
-    #         "Always produce a logically consistent diagnosis and output the final result strictly in the requested JSON format."
-    #     )
-
-    #     user_prompt = f"""
-    #         ### **TASK DESCRIPTION**
-    #         Your task is to diagnose the current state of a rotating machine. 
-    #         Based on the provided data, you must classify the state into one of the following categories:
-    #         **{self.target_labels}**.
-
-    #         ### **PROVIDED DATA**
-
-    #         **1. Vibration Tokens (Proprietary Embeddings):**
-    #         - Normal State Token: <x_stft>
-    #         - Current State Token: <ref_stft>
-
-    #         **2. Physical Knowledge (Extracted Features):**
-    #         - Features change ratio : "{knowledge_str}"
-    #         (Positive = increase from normal, Negative = decrease from normal.)
-
-    #         **3. Analysis Plan & Diagnostic Criteria (Reference Guide):**
-    #         This guide outlines the step-by-step analysis process and the criteria for each potential fault. 
-    #         You must use this as your primary reference for knowledge-based analysis.
-    #         - Plan: {plan}
-
-    #         ### **ADDITIONAL DIAGNOSTIC RULES**
-
-    #         **A. Token-based decision rules (Step 1):**
-    #         - Compare the Normal State Token <x_stft> with the Current State Token <ref_stft>.
-    #         - If the embedding similarity is high, the state is likely **normal(healthy)**.
-    #         - If the embedding deviates significantly, the state is likely abnormal and should be mapped to one of:
-    #         {self.target_labels}.
-    #         - The token-based decision in Step 1.2 MUST output exactly one label from {self.target_labels}.
-
-    #         **B. Physical feature-based decision rules (Step 2):**
-    #         Use the following quantitative hints when matching features to fault types:
-    #         - High kurtosis (e.g., kurtosis_x > 1000 or kurtosis_y > 2000) strongly indicates **bearing fault**.
-    #         - Large crest factor (e.g., crest_factor_x > 500 or crest_factor_y > 500) suggests **looseness** or **bearing fault**.
-    #         - Significant change in 1X order (e.g., |order_x_1x| or |order_y_1x| change > 30) suggests **unbalance** or **misalignment**.
-    #         - Strong negative BPFO/BPFI peaks with high kurtosis support **bearing fault**.
-    #         - Elevated RMS and peak-to-peak values (> 100% of baseline) indicate abnormal vibration severity.
-    #         The knowledge-based decision in Step 2.3 MUST also output exactly one label from {self.target_labels}.
-
-    #         **C. Fusion rules (Step 3):**
-    #         - If Step 1 (token-based) and Step 2 (feature-based) agree, confirm that label as the final diagnosis.
-    #         - If they conflict, then:
-    #         - Prefer the **feature-based diagnosis** when strong physical evidence exists
-    #             (kurtosis, crest factor, BPFO/BPFI, or peak-to-peak/RMS anomalies).
-    #         - Otherwise, prefer the **token-based diagnosis** from Step 1.
-
-    #         ### **INSTRUCTIONS**
-
-    #         You must perform a rigorous 3-step diagnostic reasoning process. 
-    #         Adhere strictly to the following structure within the `<reasoning>` block.
-
-    #         <reasoning>
-    #         **Step 1: Vibration Token-based Analysis**
-    #         1.1. Compare the Normal State Token with the Current State Token. Based on their similarity (or lack thereof), what is the initial diagnosis? A significant deviation from the normal token suggests a fault.
-    #         1.2. Output the most likely condition suggested by the vibration tokens alone, choosing exactly ONE label from: {self.target_labels}.
-
-    #         **Step 2: Physical Knowledge-based Analysis**
-    #         2.1. **Feature Comparison**: Compare the 'Current State Features' against the 'Normal State Features'. 
-    #             Note any significant differences in RMS, Kurtosis, and Crest Factor.
-    #         2.2. **Spectral Analysis**: If available, examine the orders and characteristic frequencies described in the plan. 
-    #             According to the 'Reference Guide', determine whether these support unbalance, misalignment, looseness, or bearing fault.
-    #         2.3. **Criteria Matching**: Systematically check the diagnostic ideas for each fault type listed in the 'Reference Guide'. 
-    #             Choose exactly ONE label from {self.target_labels} that best matches the 'Current State Features' and explain why.
-
-    #         **Step 3: Fused Decision**
-    #         3.1. **Synthesize Findings**: Combine the conclusions from Step 1 (token-based) and Step 2 (knowledge-based).
-    #         3.2. **Final Diagnosis**: If they agree, confirm the diagnosis. If they conflict, apply the fusion rules above and state your final diagnosis.
-    #         3.3. **Key Indicators**: List the top 2–3 most critical indicators from the physical features that led to your final decision.
-    #         </reasoning>
-
-    #         ### **OUTPUT FORMAT**
-
-    #         Provide your final answer in the JSON format below, enclosed within an `<answer>` block. 
-    #         Do NOT add any text or explanations outside the `<reasoning>` and `<answer>` blocks.
-
-    #         <answer>{{
-    #         "vib_only_label": "<The diagnosis from Step 1.2 (one of: {self.target_labels})>",
-    #         "vib_reason": "<A brief sentence explaining the token-based conclusion>",
-    #         "knowledge_only_label": "<The diagnosis from Step 2.3 (one of: {self.target_labels})>",
-    #         "knowledge_reason": "<A brief sentence explaining the knowledge-based conclusion>",
-    #         "criteria": "<The key indicators from Step 3.3>",
-    #         "final_label": "<Your final diagnosis from Step 3.2 (one of: {self.target_labels})>",
-    #         "fusion_reason": "<A brief sentence explaining how you reconciled the two analyses to reach the final decision>"
-    #         }}</answer>
-    #         """
-
-    #     return f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
     
     def __getitem__(self, index):
 
@@ -868,8 +772,8 @@ class LLM_Dataset(Dataset):
         prompt = self._create_prompt(cur_status, plan)
         
         # prompt test 용
-        llm_response = self.planner.test_prompt(prompt)
-        print(llm_response)
+        # llm_response = self.planner.test_prompt(prompt)
+        # print(llm_response)
 
         # 진단 Ground Truth (GRPO accuracy reward 계산용)
         gt_label = feature_sample.get('gt', None)

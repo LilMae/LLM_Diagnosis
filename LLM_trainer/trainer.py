@@ -279,6 +279,29 @@ class BaseTrainer(pl.LightningModule):
                 gen_batch[key] = value.to(device)
         return gen_batch
 
+    def _enter_generation_eval_mode(self) -> dict[nn.Module, bool]:
+        """Temporarily put language model + encoders in eval() for stable decoding."""
+        modules: list[nn.Module] = []
+        lm = getattr(self.model, "language_model", None)
+        if isinstance(lm, nn.Module):
+            modules.append(lm)
+        if hasattr(self.model, "encoders"):
+            for encoder in self.model.encoders.values():
+                module = getattr(encoder, "module", None)
+                projector = getattr(encoder, "projector", None)
+                if isinstance(module, nn.Module):
+                    modules.append(module)
+                if isinstance(projector, nn.Module):
+                    modules.append(projector)
+        prev_states = {module: module.training for module in modules}
+        for module in prev_states.keys():
+            module.eval()
+        return prev_states
+
+    def _restore_generation_eval_mode(self, prev_states: dict[nn.Module, bool]) -> None:
+        for module, was_training in prev_states.items():
+            module.train(was_training)
+
     def generate_from_batch(
         self,
         batch: dict,
@@ -384,10 +407,14 @@ class GRPOTrainer(BaseTrainer):
         attention_mask = batch["attention_mask"].to(device)
         prompt_lens = attention_mask.sum(dim=1)
 
-        sequences = self.generate_from_batch(
-            batch,
-            num_return_sequences=self.num_generations,
-        )
+        eval_states = self._enter_generation_eval_mode()
+        try:
+            sequences = self.generate_from_batch(
+                batch,
+                num_return_sequences=self.num_generations,
+            )
+        finally:
+            self._restore_generation_eval_mode(eval_states)
         return sequences, prompt_lens, attention_mask
 
     def _compute_logps_for_completions(

@@ -8,6 +8,7 @@ from data.dataset import get_dataset
 from data.llm_dataset import get_llm_dataset
 from torch.utils.data import DataLoader
 
+from rewards import format_reward, accuracy_reward, fusion_reward, feature_usage_reward, no_hallucination_reward, structure_reward
 
 def parse_optional_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
@@ -21,83 +22,6 @@ def parse_optional_bool(value: Optional[str]) -> Optional[bool]:
         return False
     raise argparse.ArgumentTypeError(f"Cannot interpret boolean value from '{value}'")
 
-
-def _extract_answer_json(text: str) -> Optional[dict]:
-    """<answer>{...}</answer> 블록에서 JSON payload를 파싱한다."""
-    match = re.search(r"<answer>\s*(\{.*\})\s*</answer>", text, re.DOTALL)
-    if not match:
-        return None
-    raw = match.group(1).strip()
-    # 코드블럭 표기 제거
-    if raw.startswith("```"):
-        raw = re.sub(r"^```[a-zA-Z]*", "", raw).strip()
-    if raw.endswith("```"):
-        raw = raw[:-3].strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-
-
-def _normalize_label(label: Union[str, None]) -> Optional[str]:
-    if label is None:
-        return None
-    text = str(label).lower()
-    text = text.replace("_", " ").replace("-", " ")
-    text = re.sub(r"[^a-z]+", " ", text).strip()
-    if not text:
-        return None
-    if "normal" in text or "healthy" in text:
-        return "normal"
-    if "misalign" in text:
-        return "misalignment"
-    if "loosen" in text:
-        return "looseness"
-    if "unbalance" in text or "imbalance" in text or "unbal" in text:
-        return "unbalance"
-    if "bearing" in text:
-        return "bearing"
-    return text
-
-
-def format_reward(prompts: list[str], completions: list[str], gts: list[object]) -> list[float]:
-    """
-    GRPO 보상 1: 프롬프트 템플릿 형식을 잘 지켰는지 평가한다.
-    - <think>와 <answer> 블록이 모두 존재하는지
-    - <answer> JSON이 파싱 가능한지
-    - 핵심 키(current_analysis/diagnosis_conclusion/diagnosis_plan & most_likely_fault)가 있는지
-    """
-    rewards: list[float] = []
-    for text in completions:
-        score = 0.0
-        if re.search(r"<think>.*?</think>", text, re.DOTALL):
-            score += 0.25
-        if re.search(r"<answer>.*?</answer>", text, re.DOTALL):
-            score += 0.25
-        parsed = _extract_answer_json(text)
-        if isinstance(parsed, dict):
-            score += 0.25
-            required_top = {"current_analysis", "diagnosis_conclusion", "diagnosis_plan"}
-            diag = parsed.get("diagnosis_conclusion") if isinstance(parsed, dict) else None
-            if required_top.issubset(set(parsed.keys())) and isinstance(diag, dict) and "most_likely_fault" in diag:
-                score += 0.25
-        rewards.append(score)
-    return rewards
-
-
-def accuracy_reward(prompts: list[str], completions: list[str], gts: list[object]) -> list[float]:
-    """GT 진단 라벨과 모델 예측(most_likely_fault)을 비교해 정확도 보상을 준다."""
-    rewards: list[float] = []
-    for text, gt in zip(completions, gts):
-        parsed = _extract_answer_json(text)
-        diag = parsed.get("diagnosis_conclusion") if isinstance(parsed, dict) else None
-        pred_label = None
-        if isinstance(diag, dict):
-            pred_label = diag.get("most_likely_fault")
-        pred_norm = _normalize_label(pred_label)
-        gt_norm = _normalize_label(gt)
-        rewards.append(1.0 if (pred_norm is not None and pred_norm == gt_norm) else 0.0)
-    return rewards
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Cornstarch 멀티모달 + TRL GRPO 통합 예제")
@@ -160,8 +84,18 @@ if __name__ == '__main__':
         freeze_vib_encoder=freeze_vib,
     )
     
-    reward_fns = [format_reward, accuracy_reward]
-    reward_weights = [0.4, 0.6]
+    reward_fns = [format_reward, 
+                  accuracy_reward, 
+                  fusion_reward, 
+                  feature_usage_reward,
+                  no_hallucination_reward,
+                  no_hallucination_reward]
+    reward_weights = [1.0,
+                      2.0,
+                      0.5,
+                      0.5,
+                      0.5,
+                      9.3]
     
     if args.trainer == 'GRPO' and (len(reward_fns)==0 or len(reward_weights)==0):
         print('GRPO need reward functions & weights')
@@ -186,11 +120,6 @@ if __name__ == '__main__':
     train_dataset, val_dataset = get_dataset(args, train_domain=args.train_domain,
                 valid_domain=args.valid_domain)
     train_llm_dataset, val_llm_dataset = get_llm_dataset(args, train_dataset, val_dataset)
-
-    
-    print(train_llm_dataset[0]['prompt'])
-    
-    exit()
     
     if args.trainer == 'SFT':
         trainloader = DataLoader(
