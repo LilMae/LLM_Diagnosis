@@ -63,7 +63,7 @@ class VibrationEncoderHF(PreTrainedModel):
     config_class = VibrationEncoderConfig
     main_input_name = "stft"
 
-    def __init__(self, config: VibrationEncoderConfig, vib_ae: Optional[nn.Module] = None):
+    def __init__(self, config: VibrationEncoderConfig, vib_ae: Optional[nn.Module] = None, requires_grad_for_encode: bool = True):
         super().__init__(config)
         if vib_ae is None:
             raise ValueError(
@@ -71,6 +71,7 @@ class VibrationEncoderHF(PreTrainedModel):
                 "Pass it via ctor or from_pretrained(..., vib_ae=...)."
             )
         self.vib_encoder = vib_ae
+        self.requires_grad_for_encode = requires_grad_for_encode
 
     def forward(
         self,
@@ -93,7 +94,11 @@ class VibrationEncoderHF(PreTrainedModel):
         if tensor_input is None:
             raise ValueError("STFT encoder requires an input tensor.")
 
-        z = self.vib_encoder.encode(tensor_input)
+        if self.requires_grad_for_encode:
+            z = self.vib_encoder.encode(tensor_input)
+        else:
+            with torch.no_grad():
+                z = self.vib_encoder.encode(tensor_input)
         if isinstance(z, (tuple, list)):
             z = z[0]
 
@@ -150,22 +155,26 @@ def build_stft_projector(embedding_dim: int, token_embed_dim: int) -> Multimodal
     )
     return MultimodalProjector(config=proj_cfg, projection=projection)
 
-def build_stft_module(modality_key: str, llm_hidden_size: int, vib_enc_pth:str) -> ModalEncoderModule:
+def build_stft_module(modality_key: str, llm_hidden_size: int, vib_enc_pth:str, *, trainable: bool = True) -> ModalEncoderModule:
     embedding_dim = 768
     ae = VisionTransformerAE(num_classes=5)
     """
     여기에 승하가 pretrain_ae로 가중치를 로드하는 내용을 넣어주어야 함
     load code 수정은 완료, pretrained_model_path => /checkpoints/best_model.pth
     """
-    ckpt = torch.load(vib_enc_pth)
+    ckpt = torch.load(vib_enc_pth, weights_only=False)
     state = ckpt.get("model_state_dict", ckpt)
-    pretrained_ae = ae.load_state_dict(state, strict=True)
+    ae.load_state_dict(state, strict=True)
+    if not trainable:
+        for param in ae.parameters():
+            param.requires_grad_(False)
+    
     vib_cfg = VibrationEncoderConfig(
         input_channels=2,
         input_length=224,
         hidden_size=embedding_dim,
     )
-    vibration_encoder_hf = VibrationEncoderHF(vib_cfg, vib_ae=pretrained_ae)
+    vibration_encoder_hf = VibrationEncoderHF(vib_cfg, vib_ae=ae, requires_grad_for_encode=trainable)
     vibration_encoder_hf.main_input_name = modality_key
     projector = build_stft_projector(
         embedding_dim=embedding_dim,

@@ -2,11 +2,13 @@ import pandas as pd
 from tqdm import tqdm
 import ast
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 import torch
 import os
 import matplotlib.pyplot as plt
 from scipy.signal import stft, get_window
+from collections import defaultdict
+import shutil
 
 import argparse
 
@@ -600,20 +602,103 @@ def get_dataset(args,
                                 stft_center=True,
                                 stft_power=1.0,           
                             )
-    vib_trainset = VibrationDataset(
-                                data_root=args.data_root,
-                                using_dataset = train_domain,
-                                window_sec=5,
-                                stride_sec=3,            
-                                transform=signal_imger,
-                            )
-    vib_valset = VibrationDataset(
-                                data_root=args.data_root,
-                                using_dataset = valid_domain,
-                                window_sec=5,
-                                stride_sec=3,             
-                                transform=signal_imger,
-                            )
+    
+    exp_name = 'Train_' + '+'.join(train_domain) + '_Val_' + '+'.join(valid_domain)
+    data_cache_root = os.path.join(args.cache_dir, exp_name)
+    train_pt = os.path.join(data_cache_root, 'train.pt')
+    valid_pt = os.path.join(data_cache_root, 'valid.pt')
+    
+    # 캐싱 된 것이 있으면 바로 사용
+    if os.path.exists(train_pt) and os.path.exists(valid_pt):
+        vib_trainset = CachedDataset(data_root=train_pt)
+        vib_valset = CachedDataset(data_root=valid_pt)
+        
+        return vib_trainset, vib_valset
+    else:
+        if os.path.exists(data_cache_root):
+            shutil.rmtree(data_cache_root)
+        os.makedirs(data_cache_root)
+    
+    # In Domain Train Valid 인 경우
+    if set(train_domain) == set(valid_domain):
+        vib_dataset = VibrationDataset(
+                                    data_root=args.data_root,
+                                    using_dataset = train_domain,
+                                    window_sec=5,
+                                    stride_sec=3,            
+                                    transform=signal_imger,
+                                )
+        # stratified split by dataset & merged class to keep in-domain mix
+        stratified_indices = defaultdict(list)
+        for idx, (row_idx, _) in enumerate(vib_dataset.index_map):
+            row = vib_dataset.meta_df.iloc[row_idx]
+            key = (row["dataset"], row["merged_class"])
+            stratified_indices[key].append(idx)
+
+        seed = getattr(args, "split_seed", None)
+        if seed is None:
+            seed = getattr(args, "seed", None)
+        rng = np.random.default_rng(seed if seed is not None else 42)
+        train_ratio = 0.8
+        train_indices, val_indices = [], []
+        for _, indices in stratified_indices.items():
+            shuffled = indices.copy()
+            rng.shuffle(shuffled)
+            if len(shuffled) == 1:
+                train_indices.extend(shuffled)
+                continue
+            split = int(round(len(shuffled) * train_ratio))
+            split = min(max(split, 1), len(shuffled) - 1)
+            train_indices.extend(shuffled[:split])
+            val_indices.extend(shuffled[split:])
+
+        # fallback to global split if stratified val set ends up empty
+        if len(val_indices) == 0:
+            all_indices = list(range(len(vib_dataset)))
+            rng.shuffle(all_indices)
+            split = int(round(len(all_indices) * train_ratio))
+            if len(all_indices) > 1:
+                split = min(max(split, 1), len(all_indices) - 1)
+            train_indices, val_indices = all_indices[:split], all_indices[split:]
+
+        if len(val_indices) == 0:
+            if len(train_indices) > 1:
+                val_indices.append(train_indices.pop())
+            elif len(train_indices) == 1:
+                val_indices = train_indices.copy()
+
+        vib_trainset = Subset(vib_dataset, train_indices)
+        vib_valset = Subset(vib_dataset, val_indices)
+
+    # Cross Domain Train Valid 인 경우
+    else:
+        vib_trainset = VibrationDataset(
+                                    data_root=args.data_root,
+                                    using_dataset = train_domain,
+                                    window_sec=5,
+                                    stride_sec=3,            
+                                    transform=signal_imger,
+                                )
+        vib_valset = VibrationDataset(
+                                    data_root=args.data_root,
+                                    using_dataset = valid_domain,
+                                    window_sec=5,
+                                    stride_sec=3,             
+                                    transform=signal_imger,
+                                )
+    
+    
+    # 데이터셋 캐싱
+    # all_train_data = []
+    # all_valid_data = []
+    # print('TrainSet Testing')
+    # for data_sample in tqdm(vib_trainset, dynamic_ncols=True):
+    #     all_train_data.append(data_sample)
+    # print('ValidSet Testing')
+    # for data_sample in tqdm(vib_valset, dynamic_ncols=True):
+    #     all_valid_data.append(data_sample)
+    # torch.save(all_train_data, train_pt)
+    # torch.save(all_valid_data, valid_pt)
     
     return vib_trainset, vib_valset
 
@@ -799,9 +884,9 @@ if __name__ == '__main__':
     #     #     print(f'item : {data_dict[k]}')
     #     #     print(f'type : {type(data_dict[k])}\n')
         
-    #     # print(except_dataset, 'is valid dataset')
-    #     # print("Train len(before save):", len(vib_trainset))
-    #     # print("Valid len(before save):", len(vib_valset))
-    #     # print("Train len(after load):", len(vib_trainset_cached))
-    #     # print("Valid len(after load):", len(vib_valset_cached))
+    #     print(except_dataset, 'is valid dataset')
+    #     print("Train len(before save):", len(vib_trainset))
+    #     print("Valid len(before save):", len(vib_valset))
+    #     print("Train len(after load):", len(vib_trainset_cached))
+    #     print("Valid len(after load):", len(vib_valset_cached))
     

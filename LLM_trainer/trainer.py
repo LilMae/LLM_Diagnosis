@@ -15,11 +15,12 @@ from transformers import (
     PreTrainedModel,
     PretrainedConfig,
     get_linear_schedule_with_warmup,
+    BitsAndBytesConfig,
 )
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
@@ -66,7 +67,9 @@ def build_multimodal_system(
         apply_lora: bool = True,
         cache_dir: str = "/workspace/llm_cache",
         llm_name: str = "Qwen/Qwen3-4B-Instruct-2507",
-        vib_enc_pth:str = ''
+        vib_enc_pth:str = '',
+        use_qlora: bool = False,
+        freeze_vib_encoder: bool = True,
     ) -> tuple[MultimodalModel, AutoTokenizer, MultimodalProcessor]:
     gpu_available = torch.cuda.is_available()
     if gpu_available and torch.cuda.is_bf16_supported():
@@ -76,13 +79,31 @@ def build_multimodal_system(
     else:
         compute_dtype = torch.float32
 
+    model_kwargs: dict[str, object] = {
+        "cache_dir": cache_dir,
+        "low_cpu_mem_usage": True,
+    }
+    if use_qlora:
+        if not gpu_available:
+            raise RuntimeError("QLoRA는 GPU 환경에서만 지원됩니다.")
+        quant_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=quant_dtype,
+        )
+        model_kwargs["quantization_config"] = quant_config
+        current_device = torch.cuda.current_device()
+        model_kwargs["device_map"] = {"": current_device}
+    else:
+        model_kwargs["dtype"] = compute_dtype
 
     llm = AutoModelForCausalLM.from_pretrained(
         llm_name,
-        cache_dir=cache_dir,
-        torch_dtype=compute_dtype,
-        low_cpu_mem_usage=True,
+        **model_kwargs,
     )
+    llm.is_quantized = bool(use_qlora)
     tokenizer = AutoTokenizer.from_pretrained(
         llm_name,
         cache_dir=cache_dir,
@@ -91,9 +112,18 @@ def build_multimodal_system(
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
     tokenizer.add_special_tokens({"additional_special_tokens": MODALITY_TOKENS})
 
-    encoder_modules = {key: build_stft_module(modality_key=key, 
-                                              llm_hidden_size=llm.config.hidden_size, 
-                                              vib_enc_pth=vib_enc_pth) for key in MODALITY_KEYS}
+    if use_qlora:
+        llm = prepare_model_for_kbit_training(llm)
+
+    encoder_modules = {
+        key: build_stft_module(
+            modality_key=key,
+            llm_hidden_size=llm.config.hidden_size,
+            vib_enc_pth=vib_enc_pth,
+            trainable=not freeze_vib_encoder,
+        )
+        for key in MODALITY_KEYS
+    }
 
     if apply_lora:
         peft_config = LoraConfig(
@@ -154,6 +184,7 @@ class BaseTrainer(pl.LightningModule):
         llm_mode: bool = True,
         generation_config: Optional[dict] = None,
         num_generations: int = 1,
+        sample_log_interval: int | None = 10,
     ):
         super().__init__()
         self.model = model 
@@ -166,9 +197,26 @@ class BaseTrainer(pl.LightningModule):
         self.generation_config = generation_config.copy() if generation_config else {}
         self.num_generations = max(1, num_generations)
         self._align_modal_modules()
+        self.sample_log_interval = sample_log_interval if (sample_log_interval and sample_log_interval > 0) else None
+        self.wandb_run = None
+        self._sample_table = None
+        self._llm_quantized = bool(getattr(self.model.language_model, "is_quantized", False))
 
     def forward(self, **kwargs):
         return self.model(**kwargs)
+
+    def set_wandb_run(self, wandb_run) -> None:
+        """Assign an active wandb run for manual logging."""
+        self.wandb_run = wandb_run
+
+    def _log_to_wandb(self, metrics: dict, *, step: Optional[int] = None) -> None:
+        if self.wandb_run is None or not metrics:
+            return
+        log_step = step if step is not None else self.global_step
+        self.wandb_run.log(metrics, step=log_step)
+
+    def _should_log_samples(self, step: int) -> bool:
+        return self.sample_log_interval is not None and step % self.sample_log_interval == 0
 
     def _align_modal_modules(self) -> None:
         """LLM과 STFT 인코더/프로젝터의 디바이스를 일치시킨다."""
@@ -190,9 +238,12 @@ class BaseTrainer(pl.LightningModule):
 
     def on_fit_start(self) -> None:
         self._align_modal_modules()
+        llm_mode = self.llm_mode
+        if llm_mode and self._llm_quantized:
+            llm_mode = None
         self.model.train(
             encoders_mode=self.encoder_mode,
-            llm_mode=self.llm_mode,
+            llm_mode=llm_mode,
         )
 
     def _create_optimizer(self) -> Adam:
@@ -258,6 +309,7 @@ class SFTTrainer(BaseTrainer):
         warmup_ratio: float = 0.1,
         apply_lora: bool = True,
         generation_config: Optional[dict] = None,
+        sample_log_interval: int | None = 10,
     ):
         super().__init__(
             model=model,
@@ -268,6 +320,7 @@ class SFTTrainer(BaseTrainer):
             llm_mode=False,
             generation_config=generation_config,
             num_generations=1,
+            sample_log_interval=sample_log_interval,
         )
         self.total_steps = total_steps
         self.warmup_ratio = warmup_ratio
@@ -278,6 +331,8 @@ class SFTTrainer(BaseTrainer):
         loss = outputs.loss
         batch_size = batch["input_ids"].size(0) if torch.is_tensor(batch.get("input_ids")) else None
         self.log("train_loss", loss, on_step=True, prog_bar=True, batch_size=batch_size)
+        current_step = self.global_step + 1
+        self._log_to_wandb({"train/loss": float(loss.detach().item())}, step=current_step)
         return loss
 
     def configure_optimizers(self):
@@ -297,7 +352,9 @@ class GRPOTrainer(BaseTrainer):
         warmup_ratio: float = 0.1,
         lr: float = 1e-3,
         apply_lora: bool = True,
+        reward_fn_names: Optional[list[str]] = None,
         generation_config: Optional[dict] = None,
+        sample_log_interval: int | None = 10,
     ):
         super().__init__(
             model=model,
@@ -308,9 +365,13 @@ class GRPOTrainer(BaseTrainer):
             llm_mode=True,
             generation_config=generation_config,
             num_generations=num_generations,
+            sample_log_interval=sample_log_interval,
         )
         self.reward_fns = reward_fns
         self.reward_weights = reward_weights
+        if reward_fn_names is not None and len(reward_fn_names) != len(reward_fns):
+            raise ValueError("reward_fn_names 길이는 reward_fns와 같아야 합니다.")
+        self.reward_fn_names = reward_fn_names or [f"reward_{idx}" for idx in range(len(reward_fns))]
         self.total_steps = total_steps
         self.warmup_ratio = warmup_ratio
         self.automatic_optimization = False
@@ -444,9 +505,57 @@ class GRPOTrainer(BaseTrainer):
             schedulers.step()
 
         batch_size = B if B else len(seq_logp)
+        avg_reward = rewards.mean()
         self.log("train_loss", loss, on_step=True, prog_bar=True, batch_size=batch_size)
-        self.log("avg_reward", rewards.mean(), on_step=True, prog_bar=False, batch_size=batch_size)
+        self.log("avg_reward", avg_reward, on_step=True, prog_bar=False, batch_size=batch_size)
+        current_step = self.global_step + 1
+
+        wandb_metrics = {
+            "train/loss": float(loss.detach().item()),
+            "train/avg_reward": float(avg_reward.detach().item()),
+        }
+        for name, tensor in zip(self.reward_fn_names, per_fn_rewards):
+            wandb_metrics[f"reward/{name}"] = float(tensor.mean().detach().item())
+        self._log_to_wandb(wandb_metrics, step=current_step)
+        if self._should_log_samples(current_step):
+            self._log_prompt_samples(prompts, completions, current_step)
         return loss
+
+    def _log_prompt_samples(self, prompts: list[str], completions: list[str], step: int) -> None:
+        if self.wandb_run is None or not prompts or not completions:
+            return
+        try:
+            import wandb  # type: ignore
+        except ImportError:
+            return
+        if self._sample_table is None:
+            self._sample_table = wandb.Table(
+                columns=["step", "prompt_index", "generation_index", "prompt", "completion"]
+            )
+        for prompt_idx, prompt_text in enumerate(prompts):
+            for gen_idx in range(self.num_generations):
+                comp_idx = prompt_idx * self.num_generations + gen_idx
+                if comp_idx >= len(completions):
+                    break
+                completion_text = completions[comp_idx]
+                self._sample_table.add_data(step, prompt_idx, gen_idx, prompt_text, completion_text)
+        preview_prompt = prompts[0]
+        preview_completions = "\n\n".join(
+            [
+                f"[prompt {prompt_idx} gen {gen_idx}] {completions[prompt_idx * self.num_generations + gen_idx]}"
+                for prompt_idx in range(min(len(prompts), 1))
+                for gen_idx in range(min(self.num_generations, len(completions)))
+                if (prompt_idx * self.num_generations + gen_idx) < len(completions)
+            ]
+        )
+        self.wandb_run.log(
+            {
+                "samples_table": self._sample_table,
+                "samples/latest_prompt": preview_prompt,
+                "samples/latest_generations": preview_completions,
+            },
+            step=step,
+        )
 
     def configure_optimizers(self):
         return self._configure_with_warmup(self.total_steps, self.warmup_ratio)
@@ -532,6 +641,7 @@ def get_trainer(
     mm_processor,
     reward_fns=None,
     reward_weights=None,
+    sample_log_interval: int = 10,
 ):
     generation_config = {
         "max_new_tokens": args.max_completion_length,
@@ -553,8 +663,10 @@ def get_trainer(
             warmup_ratio=args.warmup_ratio,
             apply_lora=args.apply_lora,
             generation_config=generation_config,
+            sample_log_interval=sample_log_interval,
         )
     elif args.trainer == "GRPO":
+        reward_fn_names = [getattr(fn, "__name__", f"reward_{idx}") for idx, fn in enumerate(reward_fns)] if reward_fns else []
         module = GRPOTrainer(
             model=mllm,
             tokenizer=tokenizer,
@@ -567,17 +679,29 @@ def get_trainer(
             lr=args.lr,
             apply_lora=args.apply_lora,
             generation_config=generation_config,
+            reward_fn_names=reward_fn_names,
+            sample_log_interval=sample_log_interval,
         )
     else:
         print(f"Wrong Trainer Type : {args.trainer}!")
         exit()
-    
+
+    # trainer_cfg = dict(
+    #     max_steps=args.total_steps,
+    #     enable_checkpointing=False,
+    #     logger=False,
+    #     enable_model_summary=False,
+    #     strategy="auto",
+    #     precision="bf16-mixed" if torch.cuda.is_available() else "32-true",
+    # )
     trainer_cfg = dict(
         max_steps=args.total_steps,
         enable_checkpointing=False,
         logger=False,
         enable_model_summary=False,
-        strategy="ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else "auto",
+        accelerator="gpu", 
+        devices=1,
+        strategy="auto",
         precision="bf16-mixed" if torch.cuda.is_available() else "32-true",
     )
     

@@ -1,5 +1,7 @@
 import argparse
 import functools
+import json
+import re
 from typing import Optional, Tuple, Union, Callable
 from LLM_trainer.trainer import build_multimodal_system, get_trainer, collate_fn, MultimodalGRPOCollator
 from data.dataset import get_dataset
@@ -19,43 +21,147 @@ def parse_optional_bool(value: Optional[str]) -> Optional[bool]:
         return False
     raise argparse.ArgumentTypeError(f"Cannot interpret boolean value from '{value}'")
 
+
+def _extract_answer_json(text: str) -> Optional[dict]:
+    """<answer>{...}</answer> 블록에서 JSON payload를 파싱한다."""
+    match = re.search(r"<answer>\s*(\{.*\})\s*</answer>", text, re.DOTALL)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    # 코드블럭 표기 제거
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*", "", raw).strip()
+    if raw.endswith("```"):
+        raw = raw[:-3].strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def _normalize_label(label: Union[str, None]) -> Optional[str]:
+    if label is None:
+        return None
+    text = str(label).lower()
+    text = text.replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^a-z]+", " ", text).strip()
+    if not text:
+        return None
+    if "normal" in text or "healthy" in text:
+        return "normal"
+    if "misalign" in text:
+        return "misalignment"
+    if "loosen" in text:
+        return "looseness"
+    if "unbalance" in text or "imbalance" in text or "unbal" in text:
+        return "unbalance"
+    if "bearing" in text:
+        return "bearing"
+    return text
+
+
+def format_reward(prompts: list[str], completions: list[str], gts: list[object]) -> list[float]:
+    """
+    GRPO 보상 1: 프롬프트 템플릿 형식을 잘 지켰는지 평가한다.
+    - <think>와 <answer> 블록이 모두 존재하는지
+    - <answer> JSON이 파싱 가능한지
+    - 핵심 키(current_analysis/diagnosis_conclusion/diagnosis_plan & most_likely_fault)가 있는지
+    """
+    rewards: list[float] = []
+    for text in completions:
+        score = 0.0
+        if re.search(r"<think>.*?</think>", text, re.DOTALL):
+            score += 0.25
+        if re.search(r"<answer>.*?</answer>", text, re.DOTALL):
+            score += 0.25
+        parsed = _extract_answer_json(text)
+        if isinstance(parsed, dict):
+            score += 0.25
+            required_top = {"current_analysis", "diagnosis_conclusion", "diagnosis_plan"}
+            diag = parsed.get("diagnosis_conclusion") if isinstance(parsed, dict) else None
+            if required_top.issubset(set(parsed.keys())) and isinstance(diag, dict) and "most_likely_fault" in diag:
+                score += 0.25
+        rewards.append(score)
+    return rewards
+
+
+def accuracy_reward(prompts: list[str], completions: list[str], gts: list[object]) -> list[float]:
+    """GT 진단 라벨과 모델 예측(most_likely_fault)을 비교해 정확도 보상을 준다."""
+    rewards: list[float] = []
+    for text, gt in zip(completions, gts):
+        parsed = _extract_answer_json(text)
+        diag = parsed.get("diagnosis_conclusion") if isinstance(parsed, dict) else None
+        pred_label = None
+        if isinstance(diag, dict):
+            pred_label = diag.get("most_likely_fault")
+        pred_norm = _normalize_label(pred_label)
+        gt_norm = _normalize_label(gt)
+        rewards.append(1.0 if (pred_norm is not None and pred_norm == gt_norm) else 0.0)
+    return rewards
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Cornstarch 멀티모달 + TRL GRPO 통합 예제")
     # 모델 옵션
     parser.add_argument("--trainer", type=str, choices=["SFT", "GRPO"], required=True, help="사용할 트레이너 유형")
     parser.add_argument("--apply_lora", type=bool, default=True, help="lora finetuning 적용 여부")
+    parser.add_argument("--use_qlora", action="store_true", help="4bit QLoRA 양자화/미세튜닝 사용 여부")
     parser.add_argument("--cache_dir", type=str, default='./llm_cache', help="llm_model 캐싱할 폴더")
     parser.add_argument("--llm_name", type=str, default='Qwen/Qwen3-4B-Instruct-2507', help="LLM 모델 이름")
     parser.add_argument("--vib_enc_pth", type=str, default='LLM_Diagnosis/checkpoints/best_model_0.pth', help="학습된 vib_encoder 가중치 경로")
+    parser.add_argument("--freeze_vib_encoder", type=parse_optional_bool, default=True, help="vibration encoder weight를 고정할지 여부 (기본: True)")
     
     # 학습 옵션
-    parser.add_argument("--total_steps",    type=int,   default=10,     help="학습 step 횟수")
+    parser.add_argument("--total_steps",    type=int,   default=50,     help="학습 step 횟수")
     parser.add_argument("--lr",             type=float, default=1e-3,   help="학습 learning rate")
     parser.add_argument("--warmup_ratio",   type=float, default=0.1,    help="학습 warm-up ratio")
     
     # 데이터셋 옵션
-    parser.add_argument("--batch_size",    type=int,   default=4,     help="미니배치 크기")
+    parser.add_argument("--batch_size",    type=int,   default=1,     help="미니배치 크기")
     parser.add_argument("--data_root",    type=str,   default='',     help="dataset 경로")
+    parser.add_argument("--train_domain",    type=str, nargs='+',   default=['vat', 'vbl', 'mfd', 'dxai'],     help="dataset 경로")
+    parser.add_argument("--valid_domain",    type=str, nargs='+',   default=['vat', 'vbl', 'mfd', 'dxai'],     help="dataset 경로")
+    
+    # LLM 데이터셋 옵션
+    parser.add_argument("--embedding_model",    type=str,   default='sentence-transformers/paraphrase-multilingual-mpnet-base-v2',     help="RAG를 구축할 임베딩 모델")
+    parser.add_argument("--docs_path",    type=str,   default='/workspace/docs_path',     help="RAG에 사용될 문서 폴더")
+    parser.add_argument("--retriever_k",    type=int,   default=4,     help="RAG에서 Retreive 개수")
     
     # 생성 옵션
     parser.add_argument("--num_generations",    type=int,   default=2,     help="GRPO 에서 response 생성 개수")
-    parser.add_argument("--max_completion_length",    type=int,   default=128,     help="LLM 최대 응답 길이 제한 (max_new_tokens)")
+    parser.add_argument("--max_completion_length",    type=int,   default=1024,     help="LLM 최대 응답 길이 제한 (max_new_tokens)")
     parser.add_argument("--temperature",             type=float, default=1.0,   help="LLM 생성 온도")
     parser.add_argument("--top_p",                  type=float, default=1.0,   help="LLM top-p 샘플링 값")
     parser.add_argument("--top_k",                  type=int,   default=-1,    help="LLM top-k 샘플링 값 (-1이면 비활성화)")
     parser.add_argument("--do_sample",              type=parse_optional_bool, default=None, help="샘플링 사용 여부 (true/false/none)")
+    parser.add_argument("--sample_log_interval", type=int, default=10, help="W&B에 prompt/response 샘플을 기록할 step 간격 (0이면 비활성화)")
+    parser.add_argument("--use_wandb", action="store_true", help="Weights & Biases 로깅 사용 여부")
+    parser.add_argument("--wandb_project", type=str, default="LLM_Diagnosis", help="Weights & Biases 프로젝트 이름")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="Weights & Biases 런 이름")
 
     args = parser.parse_args()
+
+    wandb_run = None
+    if args.use_wandb:
+        import wandb  # type: ignore
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
     
+    freeze_vib = True if args.freeze_vib_encoder is None else args.freeze_vib_encoder
+
     mllm, tokenizer, mm_processor = build_multimodal_system(
         apply_lora=args.apply_lora,
         cache_dir=args.cache_dir,
         llm_name=args.llm_name,
-        vib_enc_pth=args.vib_enc_pth
+        vib_enc_pth=args.vib_enc_pth,
+        use_qlora=args.use_qlora,
+        freeze_vib_encoder=freeze_vib,
     )
     
-    reward_fns = []
-    reward_weights = []
+    reward_fns = [format_reward, accuracy_reward]
+    reward_weights = [0.4, 0.6]
     
     if args.trainer == 'GRPO' and (len(reward_fns)==0 or len(reward_weights)==0):
         print('GRPO need reward functions & weights')
@@ -66,16 +172,26 @@ if __name__ == '__main__':
         tokenizer=tokenizer,
         mm_processor=mm_processor,
         reward_fns=reward_fns,
-        reward_weights=reward_weights
+        reward_weights=reward_weights,
+        sample_log_interval=args.sample_log_interval,
     )
+
+    if wandb_run is not None:
+        module.set_wandb_run(wandb_run)
     
     """
     Dataloader 생성
     변환 순서 : data.dataset.VibrationDataset -> data.llm_dataset.LLM_Dataset -> torch.utils.data.DataLoader
     """
-    train_dataset, val_dataset = get_dataset(args, train_domain=['vat', 'vbl', 'mfd'],
-                valid_domain=['dxai'])
-    train_llm_dataset, val_llm_dataset = get_llm_dataset(train_dataset, val_dataset)
+    train_dataset, val_dataset = get_dataset(args, train_domain=args.train_domain,
+                valid_domain=args.valid_domain)
+    train_llm_dataset, val_llm_dataset = get_llm_dataset(args, train_dataset, val_dataset)
+
+    
+    print(train_llm_dataset[0]['prompt'])
+    
+    exit()
+    
     if args.trainer == 'SFT':
         trainloader = DataLoader(
             dataset=train_llm_dataset,
@@ -111,6 +227,10 @@ if __name__ == '__main__':
         print(f'Wrong Trainer Type : {args.trainer}!')
         exit()
     
-    trainer.fit(module,
-                train_dataloaders=trainloader,
-                val_dataloaders=valloader)
+    try:
+        trainer.fit(module,
+                    train_dataloaders=trainloader,
+                    val_dataloaders=valloader)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
