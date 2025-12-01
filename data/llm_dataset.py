@@ -757,6 +757,8 @@ class LLM_Dataset(Dataset):
         """
 
         return f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
+
+
     
     def __getitem__(self, index):
 
