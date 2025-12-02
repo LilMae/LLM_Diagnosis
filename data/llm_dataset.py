@@ -1,9 +1,8 @@
 import os
 import sys
 import re
-import shutil
 import torch
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 from torch.utils.data import Dataset
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,13 +16,15 @@ if parent_dir not in sys.path:
 # tokenizers 병렬 처리 경고 방지 (프로세스 fork 전에 설정해야 함)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from data.dataset import VibrationDataset
+from data.dataset import VibrationDataset, CachedDataset
 from data.feature_extract import LLM_Dataset as FeatureExtractLLMDataset
 
 # LangChain imports
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+# from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
+
 from langchain_core.documents import Document
 
 class SemanticTextSplitter:
@@ -530,7 +531,6 @@ def format_docs(docs):
         lines.append(f"[DOC{idx}]:\n{text}")
     return "\n\n".join(lines)
 
-
 class Planner:
     def __init__(self,
                 tokenizer,
@@ -821,6 +821,20 @@ def get_llm_dataset(
     Returns:
         (train_llm_dataset, val_llm_dataset) 튜플
     """
+    
+    exp_name = 'LLM_Train_' + '+'.join(args.train_domain) + '_Val_' + '+'.join(args.valid_domain)
+    data_cache_root = os.path.join(args.cache_dir, exp_name)
+    print(f'data_cache_root : {data_cache_root}')
+    train_pt = os.path.join(data_cache_root, 'train.pt')
+    valid_pt = os.path.join(data_cache_root, 'valid.pt')
+    
+    if os.path.exists(train_pt) and os.path.exists(valid_pt):
+        print(f'LLM Dataset from cache files : {train_pt} / {valid_pt}')
+        train_llm_dataset = CachedDataset(data_root=train_pt)
+        val_llm_dataset = CachedDataset(data_root=valid_pt)
+        return train_llm_dataset, val_llm_dataset
+    
+    
     # Retriever 생성 (train/val 공유)
     retriever = make_retriever(
         embedding_model=args.embedding_model,

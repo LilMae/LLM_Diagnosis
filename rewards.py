@@ -249,7 +249,6 @@ def feature_usage_reward(
     return scores
 
 
-
 FORBIDDEN_PATTERNS = [
     r"<x_stft>.*similar",
     r"<ref_stft>.*similar",
@@ -295,7 +294,6 @@ def no_hallucination_reward(
         scores.append(0.0 if violated else 1.0)
 
     return scores
-
 
 def structure_reward(
     prompts: List[str],
