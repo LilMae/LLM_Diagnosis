@@ -666,19 +666,19 @@ class MultimodalGRPOCollator:
 class PeriodicMLLMCheckpoint(pl.Callback):
     """주기적으로 MultimodalModel 가중치를 저장하는 Lightning 콜백."""
 
-    def __init__(self, save_dir: str, every_n_epochs: int = 1, filename_prefix: str = "mllm"):
+    def __init__(self, save_dir: str, every_n_steps: int = 100, filename_prefix: str = "mllm"):
         super().__init__()
         self.save_dir = save_dir
-        self.every_n_epochs = max(1, int(every_n_epochs))
+        self.every_n_steps = max(1, int(every_n_steps))
         self.filename_prefix = filename_prefix
 
     def setup(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
         os.makedirs(self.save_dir, exist_ok=True)
 
-    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        epoch_idx = trainer.current_epoch + 1
-        if epoch_idx % self.every_n_epochs == 0:
-            self._save_checkpoint(trainer, pl_module, tag="epoch")
+    def on_train_batch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule, outputs, batch, batch_idx: int) -> None:
+        global_step = trainer.global_step
+        if global_step > 0 and global_step % self.every_n_steps == 0:
+            self._save_checkpoint(trainer, pl_module, tag="step")
 
     def on_train_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         self._save_checkpoint(trainer, pl_module, tag="final")
@@ -687,15 +687,14 @@ class PeriodicMLLMCheckpoint(pl.Callback):
         if trainer.global_step == 0 and tag != "final":
             return
         os.makedirs(self.save_dir, exist_ok=True)
-        epoch_num = trainer.current_epoch + 1
+        step_num = trainer.global_step
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{self.filename_prefix}-{tag}-epoch{epoch_num:04d}-{timestamp}.pt"
+        filename = f"{self.filename_prefix}-{tag}-step{step_num:06d}-{timestamp}.pt"
         save_path = os.path.join(self.save_dir, filename)
         state = {
             "model_state_dict": pl_module.model.state_dict(),
             "tokenizer_name_or_path": getattr(pl_module.tokenizer, "name_or_path", None),
             "global_step": trainer.global_step,
-            "epoch": trainer.current_epoch,
         }
         torch.save(state, save_path)
         print(f"[Checkpoint] Saved MLLM weights to {save_path}")
@@ -709,7 +708,7 @@ def get_trainer(
     reward_weights=None,
     sample_log_interval: int = 10,
     checkpoint_dir: Optional[str] = None,
-    save_every_n_epochs: int = 1,
+    save_every_n_steps: int = 100,
 ):
     generation_config = {
         "max_new_tokens": args.max_completion_length,
@@ -778,7 +777,7 @@ def get_trainer(
         callbacks.append(
             PeriodicMLLMCheckpoint(
                 save_dir=checkpoint_dir,
-                every_n_epochs=save_every_n_epochs,
+                every_n_steps=save_every_n_steps,
             )
         )
     if callbacks:

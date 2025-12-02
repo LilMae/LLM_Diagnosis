@@ -127,8 +127,8 @@ if __name__ == '__main__':
     parser.add_argument("--llm_name", type=str, default='Qwen/Qwen3-4B-Instruct-2507', help="LLM 모델 이름")
     parser.add_argument("--vib_enc_pth", type=str, default=None, help="학습된 vib_encoder 가중치 경로")
     parser.add_argument("--freeze_vib_encoder", type=parse_optional_bool, default=True, help="vibration encoder weight를 고정할지 여부 (기본: True)")
-    parser.add_argument("--checkpoint_dir", type=str, default="LLM_Diagnosis/checkpoints/mllm", help="MLLM 체크포인트를 저장할 디렉토리")
-    parser.add_argument("--save_every_n_epochs", type=int, default=1, help="MLLM 모델 저장 주기 (에폭 단위)")
+    parser.add_argument("--checkpoint_dir", type=str, default="/workspace/checkpoints/mllm", help="MLLM 체크포인트를 저장할 디렉토리")
+    parser.add_argument("--save_every_n_steps", type=int, default=10, help="MLLM 모델 저장 주기 (iteration 단위)")
     
     # 학습 옵션
     parser.add_argument("--total_steps",    type=int,   default=50,     help="학습 step 횟수")
@@ -160,7 +160,7 @@ if __name__ == '__main__':
     parser.add_argument("--wandb_run_name", type=str, default=None, help="Weights & Biases 런 이름")
 
     args = parser.parse_args()
-    args.save_every_n_epochs = max(1, args.save_every_n_epochs)
+    args.save_every_n_steps = max(1, args.save_every_n_steps)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     wandb_run = None
@@ -187,14 +187,13 @@ if __name__ == '__main__':
                   accuracy_reward, 
                   fusion_reward, 
                   feature_usage_reward,
-                  no_hallucination_reward,
-                  no_hallucination_reward]
+                  no_hallucination_reward
+                  ]
     reward_weights = [1.0,
                       2.0,
                       0.5,
                       0.5,
-                      0.5,
-                      9.3]
+                      0.5]
     
     if args.trainer == 'GRPO' and (len(reward_fns)==0 or len(reward_weights)==0):
         print('GRPO need reward functions & weights')
@@ -208,7 +207,7 @@ if __name__ == '__main__':
         reward_weights=reward_weights,
         sample_log_interval=args.sample_log_interval,
         checkpoint_dir=args.checkpoint_dir,
-        save_every_n_epochs=args.save_every_n_epochs,
+        save_every_n_steps=args.save_every_n_steps,
     )
 
     if wandb_run is not None:
