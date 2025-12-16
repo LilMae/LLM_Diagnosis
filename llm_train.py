@@ -148,7 +148,7 @@ if __name__ == '__main__':
     parser.add_argument("--retriever_k",    type=int,   default=4,     help="RAG에서 Retreive 개수")
     
     # 생성 옵션
-    parser.add_argument("--num_generations",    type=int,   default=2,     help="GRPO 에서 response 생성 개수")
+    parser.add_argument("--num_generations",    type=int,   default=4,     help="GRPO 에서 response 생성 개수")
     parser.add_argument("--max_completion_length",    type=int,   default=1024,     help="LLM 최대 응답 길이 제한 (max_new_tokens)")
     parser.add_argument("--temperature",             type=float, default=1.0,   help="LLM 생성 온도")
     parser.add_argument("--top_p",                  type=float, default=1.0,   help="LLM top-p 샘플링 값")

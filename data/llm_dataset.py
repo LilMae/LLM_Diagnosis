@@ -614,7 +614,6 @@ class Planner:
         return gen_text.strip()
         
 
-
 class LLM_Dataset(Dataset):
     """
     RAG 검색 결과와 프롬프트를 생성하는 데이터셋 클래스
